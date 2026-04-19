@@ -1,8 +1,8 @@
 import type { Metadata } from 'next'
 import './globals.css'
-import { ADSENSE_CLIENT } from '@/components/AdSlot'
 
 const BASE_URL = 'https://squishy.technyteams.in'
+const ADSENSE_CLIENT = process.env.NEXT_PUBLIC_ADSENSE_CLIENT ?? ''
 
 export const metadata: Metadata = {
   metadataBase: new URL(BASE_URL),
