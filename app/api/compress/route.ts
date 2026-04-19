@@ -1,17 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import sharp from 'sharp'
-import { registerFile, TTL_MS } from '@/lib/fileStore'
-import { ensureCron } from '@/lib/scheduler'
 import { checkRateLimit } from '@/lib/rateLimiter'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
-// Maximum upload size: 50 MB
-const MAX_BYTES = 50 * 1024 * 1024
-
-// Kick off the cleanup cron on first import
-ensureCron()
+const MAX_BYTES = 50 * 1024 * 1024 // 50 MB
 
 // ─── Compression logic ────────────────────────────────────────────────────────
 
@@ -76,24 +70,24 @@ async function compressToTargetSize(
 }
 
 // ─── POST /api/compress ───────────────────────────────────────────────────────
+// Returns the compressed image BINARY directly in the response body.
+// The client receives it as a blob, creates a local object URL, and
+// auto-downloads it — no separate /api/download round-trip needed.
+// This is the only approach that works on serverless platforms (Vercel)
+// where /tmp files do not persist between function invocations.
 
 export async function POST(req: NextRequest) {
   // Rate limiting
-  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
-    || req.headers.get('x-real-ip')
-    || '127.0.0.1'
+  const ip =
+    req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    req.headers.get('x-real-ip') ||
+    '127.0.0.1'
 
   const rl = await checkRateLimit(ip)
   if (!rl.allowed) {
     return NextResponse.json(
-      { error: `Too many requests. Please wait ${rl.resetInSeconds} seconds before trying again.` },
-      {
-        status: 429,
-        headers: {
-          'Retry-After': String(rl.resetInSeconds),
-          'X-RateLimit-Remaining': '0',
-        },
-      }
+      { error: `Too many requests. Please wait ${rl.resetInSeconds} seconds.` },
+      { status: 429, headers: { 'Retry-After': String(rl.resetInSeconds) } }
     )
   }
 
@@ -103,38 +97,31 @@ export async function POST(req: NextRequest) {
     const targetKB = parseInt(formData.get('targetKB') as string || '100')
     const outputFormat = (formData.get('outputFormat') as string || 'auto') as 'auto' | 'jpeg' | 'png' | 'webp'
 
-    // Validation
-    if (!file) {
+    if (!file)
       return NextResponse.json({ error: 'No file provided.' }, { status: 400 })
-    }
 
-    if (!file.type.startsWith('image/')) {
+    if (!file.type.startsWith('image/'))
       return NextResponse.json(
         { error: 'Only image files are accepted (PNG, JPEG, WebP, GIF, BMP, TIFF).' },
         { status: 415 }
       )
-    }
 
-    if (file.size > MAX_BYTES) {
+    if (file.size > MAX_BYTES)
       return NextResponse.json(
-        { error: `File too large. Maximum upload size is 50 MB. Your file is ${(file.size / 1024 / 1024).toFixed(1)} MB.` },
+        { error: `File too large. Max 50 MB. Your file is ${(file.size / 1024 / 1024).toFixed(1)} MB.` },
         { status: 413 }
       )
-    }
 
-    if (isNaN(targetKB) || targetKB < 1 || targetKB > 50000) {
+    if (isNaN(targetKB) || targetKB < 1 || targetKB > 50000)
       return NextResponse.json(
         { error: 'Target size must be between 1 KB and 50,000 KB.' },
         { status: 400 }
       )
-    }
 
-    const arrayBuffer = await file.arrayBuffer()
-    const inputBuffer = Buffer.from(arrayBuffer)
+    const inputBuffer = Buffer.from(await file.arrayBuffer())
     const originalSizeKB = Math.round(inputBuffer.length / 1024)
     const targetBytes = targetKB * 1024
 
-    // Detect output format
     const mime = file.type.toLowerCase()
     let format: 'jpeg' | 'png' | 'webp'
     if (outputFormat === 'auto') {
@@ -145,10 +132,7 @@ export async function POST(req: NextRequest) {
       format = outputFormat
     }
 
-    // Get original dimensions
     const meta = await sharp(inputBuffer).metadata()
-
-    // Compress
     const { buffer, quality, iterations } = await compressToTargetSize(inputBuffer, format, targetBytes)
 
     const finalSizeKB = Math.round(buffer.length / 1024)
@@ -159,37 +143,25 @@ export async function POST(req: NextRequest) {
     const originalName = file.name.replace(/\.[^.]+$/, '')
     const downloadName = `${originalName}_squished.${extMap[format]}`
 
-    // Register file for temporary storage (deleted after TTL_MS)
-    const fileId = registerFile(buffer, {
-      originalName: downloadName,
-      mimeType: mimeMap[format],
-      finalSizeKB,
-      originalSizeKB,
-      compressionRatio,
-      width: meta.width || 0,
-      height: meta.height || 0,
-      format,
-    })
-
-    const expiresAt = Date.now() + TTL_MS
-
-    return NextResponse.json({
-      fileId,
-      downloadName,
-      mimeType: mimeMap[format],
-      originalSizeKB,
-      finalSizeKB,
-      compressionRatio,
-      quality,
-      iterations,
-      width: meta.width || 0,
-      height: meta.height || 0,
-      format,
-      expiresAt,   // epoch ms — client shows countdown
-    }, {
+    // Return compressed binary directly — works on serverless (no /tmp persistence needed)
+    return new NextResponse(new Uint8Array(buffer), {
       headers: {
+        'Content-Type': mimeMap[format],
+        'Content-Disposition': `attachment; filename="${downloadName}"`,
+        'Content-Length': String(buffer.length),
+        'Cache-Control': 'private, no-store',
+        // Metadata passed via headers so the client can display stats
+        'X-Original-Size': String(originalSizeKB),
+        'X-Final-Size': String(finalSizeKB),
+        'X-Compression-Ratio': compressionRatio,
+        'X-Quality': String(quality),
+        'X-Iterations': String(iterations),
+        'X-Width': String(meta.width || 0),
+        'X-Height': String(meta.height || 0),
+        'X-Format': format,
+        'X-Download-Name': downloadName,
         'X-RateLimit-Remaining': String(rl.remaining),
-      }
+      },
     })
   } catch (err: any) {
     console.error('[squish] Compression error:', err)
