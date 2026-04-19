@@ -1,11 +1,3 @@
-/**
- * GET /api/download?id=<fileId>
- *
- * Serves a previously compressed file from temporary storage.
- * The file is deleted 10 minutes after it was created (via fileStore TTL).
- * Returns 404 if the file has already expired or never existed.
- */
-
 import { NextRequest, NextResponse } from 'next/server'
 import { getFile } from '@/lib/fileStore'
 import { ensureCron } from '@/lib/scheduler'
@@ -33,7 +25,10 @@ export async function GET(req: NextRequest) {
     )
   }
 
-  return new NextResponse(entry.buffer, {
+  // Cast Buffer to Uint8Array — required by NextResponse BodyInit type in newer TS
+  const body = new Uint8Array(entry.buffer)
+
+  return new NextResponse(body, {
     headers: {
       'Content-Type': entry.mimeType,
       'Content-Disposition': `attachment; filename="${entry.originalName}"`,
