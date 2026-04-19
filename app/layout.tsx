@@ -2,8 +2,7 @@ import type { Metadata } from 'next'
 import { ADSENSE_CLIENT } from '@/components/AdSlot'
 import './globals.css'
 
-const BASE_URL = 'https://www.imagesquish.com'
-
+const BASE_URL = 'https://squishy.technyteams.in' 
 export const metadata: Metadata = {
   metadataBase: new URL(BASE_URL),
   title: {
